@@ -1,0 +1,4122 @@
+'use strict'
+
+const {
+  downloadMediaMessage,
+  jidNormalizedUser
+} = require('@whiskeysockets/baileys')
+
+const fs = require('fs')
+const { execSync } = require('child_process')
+
+const BOT_NAME = 'PETER-BOT'
+const OWNER_NAME = 'LØRD SUKUNA'
+
+/*
+ * IMPORTANTE:
+ * Este número deve ser o número que terá permissão de dono.
+ * Mantém o mesmo número definido por ti no bot.
+ */
+const OWNER_NUMBER = '244948179380'
+const OWNER_JID = jidNormalizedUser(`${OWNER_NUMBER}@s.whatsapp.net`)
+
+const startTime = Date.now()
+
+const DATA = {
+  modo: './modo.json',
+  regras: './regras.json',
+  warns: './warns.json',
+  config: './config.json'
+}
+
+const pending = new Map()
+
+let warns = {}
+let regras = {
+  texto:
+    '① 🤝 Respeite os membros.\n' +
+    '② 🚫 Evite spam.\n' +
+    '③ 🔞 Conteúdo proibido não.\n' +
+    '④ 🛡️ Respeite a administração.\n' +
+    '⑤ 🕸️ Divirta-se sem arrumar confusão.'
+}
+
+let config = {
+  welcome: true,
+  bye: true,
+  welcomeText: '',
+  byeText: ''
+}
+
+function loadJSON(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, JSON.stringify(fallback, null, 2))
+      return fallback
+    }
+
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+function saveJSON(file, data) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2))
+  } catch (e) {
+    console.log(`Erro ao salvar ${file}:`, e.message)
+  }
+}
+
+warns = loadJSON(DATA.warns, {})
+regras = loadJSON(DATA.regras, regras)
+config = loadJSON(DATA.config, config)
+
+function getModo() {
+  try {
+    const d = JSON.parse(fs.readFileSync(DATA.modo, 'utf8'))
+    return d.modo === 'Aranha' ? 'Aranha' : 'Peter'
+  } catch {
+    return 'Peter'
+  }
+}
+
+function setModo(modo) {
+  const valor = modo === 'Aranha' ? 'Aranha' : 'Peter'
+  saveJSON(DATA.modo, { modo: valor })
+  return valor
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)]
+}
+
+function isGroup(from) {
+  return typeof from === 'string' && from.endsWith('@g.us')
+}
+
+function normalizeJid(jid) {
+  try {
+    return jidNormalizedUser(String(jid || ''))
+  } catch {
+    return String(jid || '')
+  }
+}
+
+function isOwner(jid) {
+  return normalizeJid(jid) === OWNER_JID
+}
+
+function mention(jid) {
+  return `@${String(jid || '')
+    .split('@')[0]
+    .split(':')[0]}`
+}
+
+function getSender(m, from) {
+  return m?.key?.participant || m?.key?.remoteJid || from
+}
+
+function getContextInfo(m) {
+  return (
+    m?.message?.extendedTextMessage?.contextInfo ||
+    m?.message?.imageMessage?.contextInfo ||
+    m?.message?.videoMessage?.contextInfo ||
+    m?.message?.stickerMessage?.contextInfo ||
+    null
+  )
+}
+
+function getQuotedMessage(m) {
+  return getContextInfo(m)?.quotedMessage || null
+}
+
+function getQuotedParticipant(m) {
+  return getContextInfo(m)?.participant || null
+}
+
+function getMentions(m) {
+  return getContextInfo(m)?.mentionedJid || []
+}
+
+function getFirstMention(m) {
+  const list = getMentions(m)
+  return list.length ? list[0] : null
+}
+
+function formatUptime() {
+  let s = Math.floor((Date.now() - startTime) / 1000)
+
+  const d = Math.floor(s / 86400)
+  s %= 86400
+
+  const h = Math.floor(s / 3600)
+  s %= 3600
+
+  const m = Math.floor(s / 60)
+  s %= 60
+
+  if (d) return `${d}d ${h}h ${m}m`
+  if (h) return `${h}h ${m}m ${s}s`
+  if (m) return `${m}m ${s}s`
+
+  return `${s}s`
+}
+
+function getGroupWarns(group) {
+  if (!warns[group]) warns[group] = {}
+  return warns[group]
+}
+
+function getWarn(group, jid) {
+  return getGroupWarns(group)[normalizeJid(jid)] || 0
+}
+
+function addWarn(group, jid) {
+  const j = normalizeJid(jid)
+  const data = getGroupWarns(group)
+
+  data[j] = (data[j] || 0) + 1
+  saveJSON(DATA.warns, warns)
+
+  return data[j]
+}
+
+function resetWarn(group, jid) {
+  const j = normalizeJid(jid)
+  const data = getGroupWarns(group)
+
+  delete data[j]
+  saveJSON(DATA.warns, warns)
+}
+
+async function getMetadata(sock, from) {
+  if (!isGroup(from)) return null
+
+  try {
+    return await sock.groupMetadata(from)
+  } catch {
+    return null
+  }
+}
+
+function findParticipant(meta, jid) {
+  if (!meta?.participants) return null
+
+  const wanted = normalizeJid(jid)
+
+  return (
+    meta.participants.find(
+      p => normalizeJid(p.id) === wanted
+    ) || null
+  )
+}
+
+async function isGroupAdmin(sock, from, jid) {
+  const meta = await getMetadata(sock, from)
+  const participant = findParticipant(meta, jid)
+
+  if (!participant) return false
+
+  return (
+    participant.admin === 'admin' ||
+    participant.admin === 'superadmin'
+  )
+}
+
+async function isBotAdmin(sock, from) {
+  const botJid = normalizeJid(sock?.user?.id)
+
+  return await isGroupAdmin(sock, from, botJid)
+}
+
+async function requireGroup(sock, m, from) {
+  if (isGroup(from)) return true
+
+  await sock.sendMessage(
+    from,
+    {
+      text: panelError(
+        getModo(),
+        'GRUPO',
+        'Este comando só funciona em grupos.'
+      )
+    },
+    { quoted: m }
+  )
+
+  return false
+}
+
+async function requireAdmin(sock, m, from, sender) {
+  if (!(await requireGroup(sock, m, from))) return false
+
+  if (isOwner(sender)) return true
+
+  if (!(await isGroupAdmin(sock, from, sender))) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelPermission(
+          getModo(),
+          'PERMISSÃO',
+          'Apenas administradores podem usar esta função.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return false
+  }
+
+  return true
+}
+
+async function requireBotAdmin(sock, m, from) {
+  if (!(await isBotAdmin(sock, from))) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelPermission(
+          getModo(),
+          'BOT',
+          'Preciso ser administrador do grupo para executar essa ação.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return false
+  }
+
+  return true
+}
+
+function panelTheme(modo) {
+  if (modo === 'Aranha') {
+    return {
+      footer: '💀',
+      icon: '🕷️'
+    }
+  }
+
+  return {
+    footer: '🕸️',
+    icon: '🕷️'
+  }
+}
+
+function makePanel(modo, titulo, corpo, footer) {
+  const theme = panelTheme(modo)
+
+  const lines = String(corpo || '').split('\n')
+
+  let out = `╭━━━〔 ${titulo} 〕━━━╮\n│`
+
+  for (const line of lines) {
+    if (!line) {
+      out += '\n│'
+    } else {
+      out += `\n│ ${line}`
+    }
+  }
+
+  out +=
+    `\n│\n╰━━━━━━〔 ${footer || theme.footer} 〕━━━━━━╯`
+
+  return out
+}
+
+function panelSuccess(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `✅ ${titulo}`,
+    corpo,
+    '🕸️'
+  )
+}
+
+function panelError(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `❌ ${titulo}`,
+    corpo,
+    '💀'
+  )
+}
+
+function panelWarning(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `⚠️ ${titulo}`,
+    corpo,
+    '💢'
+  )
+}
+
+function panelPermission(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `🔐 ${titulo}`,
+    corpo,
+    '🛡️'
+  )
+}
+
+function panelProcessing(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `⚙️ ${titulo}`,
+    corpo,
+    '🕸️'
+  )
+}
+
+function panelConfirmation(modo, titulo, corpo) {
+  return makePanel(
+    modo,
+    `⚠️ ${titulo}`,
+    corpo,
+    '⏳'
+  )
+}
+
+function progressBar(percent) {
+  const total = 10
+  const filled = Math.round(
+    (percent / 100) * total
+  )
+
+  return (
+    '█'.repeat(Math.max(0, filled)) +
+    '░'.repeat(Math.max(0, total - filled))
+  )
+}
+
+function createProgress(sock, from, quoted, modo, titulo, corpo) {
+  return sock.sendMessage(
+    from,
+    {
+      text: panelProcessing(
+        modo,
+        titulo,
+        `${corpo}\n\n${progressBar(10)} 10%`
+      )
+    },
+    { quoted }
+  )
+}
+
+async function editProgress(
+  sock,
+  from,
+  key,
+  modo,
+  titulo,
+  corpo,
+  percent,
+  footer
+) {
+  if (!key) return null
+
+  return sock.sendMessage(
+    from,
+    {
+      text: makePanel(
+        modo,
+        `⚙️ ${titulo}`,
+        `${corpo}\n\n${progressBar(percent)} ${percent}%`,
+        footer || '🕸️'
+      ),
+      edit: key
+    }
+  )
+}
+
+function setPending(from, executor, action, target) {
+  const key =
+    `${from}:${normalizeJid(executor)}`
+
+  pending.set(key, {
+    action,
+    target,
+    executor: normalizeJid(executor),
+    time: Date.now()
+  })
+
+  return key
+}
+
+function getPending(from, executor) {
+  const key =
+    `${from}:${normalizeJid(executor)}`
+
+  const data = pending.get(key)
+
+  if (!data) return null
+
+  if (Date.now() - data.time > 30000) {
+    pending.delete(key)
+    return null
+  }
+
+  return data
+}
+
+function clearPending(from, executor) {
+  const key =
+    `${from}:${normalizeJid(executor)}`
+
+  pending.delete(key)
+}
+
+function targetFromMessage(m) {
+  return (
+    getFirstMention(m) ||
+    getQuotedParticipant(m)
+  )
+}
+
+async function resolveTarget(sock, m, from, args) {
+  const mentioned = getFirstMention(m)
+
+  if (mentioned) return mentioned
+
+  const quoted = getQuotedParticipant(m)
+
+  if (quoted) return quoted
+
+  const first = args?.[0]
+
+  if (
+    first &&
+    /^\d{7,15}$/.test(
+      first.replace(/[^\d]/g, '')
+    )
+  ) {
+    return `${first.replace(/[^\d]/g, '')}@s.whatsapp.net`
+  }
+
+  return null
+}
+
+function removeMentionTokens(args) {
+  return (args || []).filter(
+    x => !/^@\d+$/.test(x)
+  )
+}
+
+/* =========================================================
+   PERSONAS
+========================================================= */
+
+const peterDB = {
+  mention: [
+    '💙 Oi @%s! Sou o Peter 🕷️\n\nDigita `.menu` para veres os comandos.',
+    '🕸️ Fala @%s! Precisas de ajuda? 💙\n\nUsa `.menu`.',
+    '⚡ @%s! Tô aqui. O que precisas? 🕷️',
+    '💙 Ei @%s! Não fica aí parado. Manda o que precisas.',
+    '🕷️ @%s, fala comigo. A gente resolve isso.'
+  ],
+
+  dono: [
+    '👑 Fala, chefe LØRD SUKUNA! 💙',
+    '🕷️ Fala, LØRD SUKUNA. Tô ouvindo.',
+    '💙 Sempre às ordens, chefe.',
+    '🕸️ Chefe, manda a missão.',
+    '⚡ LØRD SUKUNA detectado. Sistema atento.'
+  ],
+
+  resposta: [
+    '💙 Tranquilo. Estou contigo.',
+    '🕷️ Entendido.',
+    '🕸️ Pode deixar comigo.',
+    '⚡ Fechado.',
+    '💙 Vamos resolver isso.'
+  ]
+}
+
+const aranhaDB = {
+  mention: [
+    '🕷️ Tsc... fala logo @%s. 💀',
+    '💢 O que tu quer, @%s? Tô sem paciência.',
+    '😏 Olha quem apareceu... @%s. Fala.',
+    '🕸️ @%s, mede as palavras.',
+    '💀 Fala. Rápido.',
+    '🕷️ Tu de novo? Que azar o meu.',
+    '💢 Desembucha, criatura.',
+    '😏 Se for besteira, nem começa.',
+    '🕸️ Anda. Não tenho o dia inteiro.',
+    '💀 Finalmente alguém resolveu aparecer.'
+  ],
+
+  dono: [
+    '👑 Fala, chefe LØRD SUKUNA.',
+    '👑 Sim, senhor. Ordens?',
+    '🕷️ LØRD SUKUNA! Tô ouvindo.',
+    '⚡ Chefe, manda a ordem.',
+    '👑 O dono chamou. Agora presta atenção.'
+  ],
+
+  insulto: [
+    '💢 Seu idiota, pelo menos tenta pensar antes de escrever.',
+    '🕷️ Tu consegues ser mais confuso que tutorial mal feito.',
+    '💀 Que pergunta de merda. Mas pronto, vou responder.',
+    '😏 Parabéns, campeão. Conseguiste complicar o simples.',
+    '🕸️ Não me faz perder a paciência, animal.',
+    '💢 Isso foi tão burro que quase doeu em mim.',
+    '🕷️ Palhaço. Explica direito o que queres.',
+    '💀 Tu acordaste hoje decidido a testar minha paciência, né?',
+    '😏 Que ideia brilhante... pena que é uma merda.',
+    '🕸️ Se vais fazer besteira, pelo menos avisa antes.'
+  ],
+
+  resposta: [
+    '🕷️ Entendido.',
+    '💀 Fechado.',
+    '😏 Pode deixar.',
+    '🕸️ Já percebi.',
+    '💢 Certo. Próximo.',
+    '⚡ Resolvido.'
+  ]
+}
+
+function personaReply(modo, sender) {
+  const numero =
+    String(sender || '')
+      .split('@')[0]
+      .split(':')[0]
+
+  if (modo === 'Aranha') {
+    return pick(aranhaDB.mention)
+      .replace('%s', numero)
+  }
+
+  return pick(peterDB.mention)
+    .replace('%s', numero)
+}
+
+function personaOwner(modo) {
+  return modo === 'Aranha'
+    ? pick(aranhaDB.dono)
+    : pick(peterDB.dono)
+}
+
+/* =========================================================
+   MENUS
+========================================================= */
+
+function menuPrincipal(modo) {
+  const corpo =
+`│
+│ 🤖 𝙋𝙀𝙍𝙎𝙊𝙉𝘼: ${modo.toUpperCase()}
+│ ⚡ SISTEMA: ONLINE
+│
+│ 📚 .menu1
+│ └─ 🕷️ Interação
+│
+│ 🎬 .menu2
+│ └─ 🎨 Mídia
+│
+│ 👥 .menu3
+│ └─ 📋 Grupo
+│
+│ 🛡️ .menu4
+│ └─ 🔐 Administração
+│
+│ ⚙️ .menu5
+│ └─ 🧠 Sistema
+│
+│ 👑 .ownermenu
+│ └─ 🔒 Controle do dono
+│
+│ 💙 Peter → amigável
+│ 🕷️ Aranha → ácido
+│
+│ Digita o comando para abrir o painel.`
+
+  return makePanel(
+    modo,
+    '🕷️ PETER-BOT',
+    corpo.replace(/^│\n/, '').replace(/^\n/, ''),
+    modo === 'Aranha' ? '💀' : '🕸️'
+  )
+}
+
+function menu1() {
+  return makePanel(
+    getModo(),
+    '🕷️ 𝙄𝙉𝙏𝙀𝙍𝘼𝘾̧𝘼̃𝙊',
+`🎭 ᴘᴇʀsᴏɴᴀ
+├─ 🕷️ .peter
+└─ 👑 .dono
+
+🎲 ᴅɪᴠᴇʀsᴀ̃ᴏ
+├─ 🪙 .coin
+├─ ❤️ .ship
+├─ 🎯 .chance
+└─ 🎲 .dado
+
+😈 ɪɴᴛᴇʀᴀᴄ̧ᴀ̃ᴏ
+├─ 💢 .zoar @user
+├─ 🤗 .abraçar @user
+├─ 👊 .soco @user
+├─ 💋 .beijar @user
+└─ ❓ .pergunta
+
+════════ 🕷️ ════════
+💙 Peter: responde de forma amigável
+💀 Aranha: provoca e usa humor ácido`,
+    '🕸️'
+  )
+}
+
+function menu2() {
+  return makePanel(
+    getModo(),
+    '🎨 𝙈𝙄́𝘿𝙄𝘼',
+`🎭 sᴛɪᴄᴋᴇʀ
+├─ 🎨 .s
+├─ 🎬 .st
+├─ 🖼️ .toimg
+└─ 🖼️ .ti
+
+🧩 ɪɴғᴏ
+├─ 🔎 .stickerinfo
+├─ 🆔 .stickerid
+└─ 📦 .stickerpack
+
+📌 ᴄᴏɴᴛᴇᴜ́ᴅᴏ
+├─ 💾 .save
+├─ 🔁 .repost
+├─ 😂 .meme
+├─ ❤️ .react
+└─ 💬 .quote
+
+⚡ Foto enviada sem comando
+└─ 🎨 Conversão automática para sticker`,
+    '🎨'
+  )
+}
+
+function menu3() {
+  return makePanel(
+    getModo(),
+    '👥 𝙂𝙍𝙐𝙋𝙊',
+`📋 ɪɴғᴏʀᴍᴀᴄ̧ᴀ̃ᴏ
+├─ 📋 .infogp
+├─ 👮 .admins
+└─ 🔗 .linkgp
+
+📢 ᴍᴇɴᴄ̧ᴏ̃ᴇs
+├─ 📣 .tagall
+└─ 🕶️ .hidetag
+
+📜 ᴏʀɢᴀɴɪᴢᴀᴄ̧ᴀ̃ᴏ
+├─ 📖 .regras
+└─ 📝 .descrição
+
+🎯 ᴀᴛɪᴠɪᴅᴀᴅᴇs
+├─ 🗳️ .enquete
+├─ ❓ .pergunta
+├─ 🎲 .sorteio
+├─ 🧠 .quiz
+├─ ⚔️ .desafio
+└─ 🏆 .ranking
+
+📅 ᴘʟᴀɴᴏ
+├─ 📆 .evento
+├─ ⏳ .contagem
+├─ ⏰ .lembrete
+└─ 📢 .anuncio
+
+👥 ᴍᴇᴍʙʀᴏs
+├─ 📊 .membros
+└─ 🟢 .online
+
+════════ 🕷️ ════════
+🛡️ Administração → .menu4`,
+    '🕸️'
+  )
+}
+
+function menu4() {
+  return makePanel(
+    getModo(),
+    '🛡️ 𝘼𝘿𝙈𝙄𝙉',
+`👤 ᴍᴇᴍʙʀᴏs
+├─ 🚫 .ban @user
+├─ ⬆️ .promover @user
+├─ ⬇️ .rebaixar @user
+└─ 🔇 .kick @user
+
+🔇 ᴄᴏɴᴛʀᴏʟᴇ
+├─ 🔒 .mute
+└─ 🔓 .unmute
+
+⚠️ ᴀᴅᴠᴇʀᴛᴇ̂ɴᴄɪᴀs
+├─ ⚠️ .warn @user
+├─ 📊 .warnings @user
+└─ 🧹 .clearwarn @user
+
+🧹 ᴍᴏᴅᴇʀᴀᴄ̧ᴀ̃ᴏ
+├─ 🗑️ .del
+└─ 🧹 .clear
+
+⚙️ ᴄᴏɴғɪɢᴜʀᴀᴄ̧ᴀ̃ᴏ
+├─ 📝 .setrules
+├─ 📢 .setwelcome
+└─ 👋 .setbye
+
+🔐 ᴘʀᴏᴛᴇᴄ̧ᴀ̃ᴏ
+├─ 👑 Proteção do dono
+├─ 🤖 Proteção do bot
+├─ 🛡️ Verificação de permissões
+└─ ⚠️ Confirmação de ações sensíveis
+
+════════ 🕷️ ════════
+⚡ Confirmações expiram em 30 segundos.`,
+    '🛡️'
+  )
+}
+
+function menu5() {
+  return makePanel(
+    getModo(),
+    '⚙️ 𝙎𝙄𝙎𝙏𝙀𝙈𝘼',
+`📡 ᴇsᴛᴀᴅᴏ
+├─ 📊 .status
+└─ 🏓 .ping
+
+🤖 ᴘᴇʀsᴏɴᴀ
+└─ 🕷️ .modo
+
+🧠 ᴅɪᴀɢɴᴏ́sᴛɪᴄᴏ
+├─ ⏱️ Uptime
+├─ 📡 Conexão
+├─ 🤖 Processo
+├─ 💾 Memória
+└─ 🕸️ Estado do bot
+
+📦 ᴀʀǫᴜɪᴠᴏs
+├─ 📄 modo.json
+├─ 📜 regras.json
+└─ ⚠️ warns.json
+
+🛠️ ᴠᴇʀɪғɪᴄᴀᴄ̧ᴀ̃ᴏ
+├─ 🔌 Baileys
+├─ 🟢 Conexão
+└─ 🧩 Recursos carregados
+
+════════ 🕷️ ════════
+👑 Controle avançado → .ownermenu`,
+    '⚙️'
+  )
+}
+
+function ownerMenu() {
+  return makePanel(
+    getModo(),
+    '👑 𝙊𝙒𝙉𝙀𝙍',
+`👑 ᴄᴏɴᴛʀᴏʟᴇ
+├─ ⚙️ .config
+└─ 🔐 .acesso
+
+🤖 sɪsᴛᴇᴍᴀ
+├─ 🔄 .restart
+└─ 🛑 .shutdown
+
+🎨 ᴘᴇʀғɪʟ
+├─ 📝 .setbio
+└─ 🖼️ .setpp
+
+🔐 sᴇɢᴜʀᴀɴᴄ̧ᴀ
+├─ 🛡️ Proteção do proprietário
+├─ 🤖 Proteção do bot
+└─ ⚠️ Confirmação de ações
+
+🧠 ᴘᴇʀsᴏɴᴀ
+└─ ⚡ Controle avançado de modo
+
+════════ 👑 ════════
+👤 Dono: ${OWNER_NAME}
+🔐 Acesso: exclusivo`,
+    '👑'
+  )
+}
+
+/* =========================================================
+   ALIASES
+========================================================= */
+
+const aliases = {
+  '.m': '.menu',
+  '.m1': '.menu1',
+  '.m2': '.menu2',
+  '.m3': '.menu3',
+  '.m4': '.menu4',
+  '.m5': '.menu5',
+
+  '.pt': '.peter',
+
+  '.st': '.s',
+  '.ti': '.toimg',
+
+  '.ht': '.hidetag',
+  '.ta': '.tagall',
+  '.lg': '.linkgp',
+
+  '.b': '.ban',
+  '.p': '.promover',
+  '.r': '.rebaixar',
+
+  '.mt': '.mute',
+  '.umt': '.unmute',
+
+  '.w': '.warn',
+  '.ws': '.warnings',
+
+  '.dl': '.del',
+  '.ad': '.admins',
+
+  '.c': '.coin',
+  '.sh': '.ship',
+
+  '.om': '.ownermenu',
+
+  '.cf': '.confirmar',
+
+  '.md': '.modo',
+  '.sts': '.status',
+
+  '.rs': '.restart',
+  '.sd': '.shutdown',
+
+  '.sb': '.setbio',
+  '.spp': '.setpp'
+}
+
+/* =========================================================
+   MÍDIA
+========================================================= */
+
+function hasFfmpeg() {
+  try {
+    execSync('ffmpeg -version', {
+      stdio: 'ignore'
+    })
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+function tempFile(ext) {
+  return `./tmp_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2)}.${ext}`
+}
+
+async function downloadQuotedMedia(sock, m) {
+  const quoted = getQuotedMessage(m)
+
+  if (!quoted) return null
+
+  const fakeMessage = {
+    key: {
+      remoteJid: m.key.remoteJid,
+      id: m.key.id,
+      participant: getQuotedParticipant(m)
+    },
+    message: quoted
+  }
+
+  try {
+    return await downloadMediaMessage(
+      fakeMessage,
+      'buffer',
+      {}
+    )
+  } catch {
+    return null
+  }
+}
+
+async function downloadCurrentMedia(sock, m) {
+  try {
+    return await downloadMediaMessage(
+      m,
+      'buffer',
+      {}
+    )
+  } catch {
+    return null
+  }
+}
+
+function cleanup(file) {
+  try {
+    if (file && fs.existsSync(file)) {
+      fs.unlinkSync(file)
+    }
+  } catch {}
+}
+
+async function makeSticker(sock, m, from, modo) {
+  if (!hasFfmpeg()) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelError(
+          modo,
+          'FFMPEG',
+          'FFmpeg não está instalado no Termux.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  const quoted = getQuotedMessage(m)
+
+  const source =
+    quoted ||
+    m.message?.imageMessage ||
+    m.message?.videoMessage
+
+  if (!source) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'STICKER',
+          'Responde a uma foto/vídeo ou envia mídia com o comando `.s`.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  const progress = await createProgress(
+    sock,
+    from,
+    m,
+    modo,
+    'STICKER',
+    '🕸️ Iniciando processamento...'
+  )
+
+  let input = null
+  let output = null
+
+  try {
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'STICKER',
+      '📥 Recebendo mídia...',
+      25
+    )
+
+    input = tempFile(
+      source.mimetype?.startsWith('video/')
+        ? 'mp4'
+        : 'jpg'
+    )
+
+    output = tempFile('webp')
+
+    const buffer = quoted
+      ? await downloadQuotedMedia(sock, m)
+      : await downloadCurrentMedia(sock, m)
+
+    if (!buffer) {
+      throw new Error(
+        'Não foi possível baixar a mídia.'
+      )
+    }
+
+    fs.writeFileSync(input, buffer)
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'STICKER',
+      '🧪 Analisando formato...',
+      45
+    )
+
+    const isVideo =
+      source.mimetype?.startsWith('video/') ||
+      source.mimetype === 'image/gif'
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'STICKER',
+      '⚙️ Convertendo...',
+      70
+    )
+
+    let command
+
+    if (isVideo) {
+      command =
+        `ffmpeg -y -i "${input}" ` +
+        `-vf "fps=15,scale=512:512:force_original_aspect_ratio=decrease,` +
+        `pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white@0" ` +
+        `-t 6 -an -c:v libwebp -q:v 60 -loop 0 "${output}"`
+    } else {
+      command =
+        `ffmpeg -y -i "${input}" ` +
+        `-vf "scale=512:512:force_original_aspect_ratio=decrease,` +
+        `pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white@0" ` +
+        `-frames:v 1 -c:v libwebp -q:v 60 "${output}"`
+    }
+
+    execSync(command, {
+      stdio: 'ignore'
+    })
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'STICKER',
+      '🕸️ Finalizando sticker...',
+      90
+    )
+
+    const sticker = fs.readFileSync(output)
+
+    await sock.sendMessage(
+      from,
+      {
+        sticker
+      },
+      { quoted: m }
+    )
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'STICKER',
+      '✅ Sticker finalizado.',
+      100,
+      modo === 'Aranha' ? '💀' : '🕸️'
+    )
+
+    const sender = getSender(m, from)
+
+    let groupName = 'Conversa privada'
+
+    if (isGroup(from)) {
+      try {
+        const meta = await sock.groupMetadata(from)
+        groupName = meta.subject || groupName
+      } catch {}
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          modo === 'Aranha'
+            ? '🕷️ ARANHA'
+            : '💙 PETER',
+`🕸️ ᴘᴇᴅɪᴅᴏ ᴘᴏʀ: ${mention(sender)}
+⚡ ᴄʀɪᴀᴅᴏ ᴘᴏʀ: ${BOT_NAME}
+👑 ᴄʀɪᴀᴅᴏʀ: ${OWNER_NAME}
+👥 ɢʀᴜᴘᴏ: ${groupName}`,
+          modo === 'Aranha' ? '💀' : '🕸️'
+        ),
+        mentions: [sender]
+      }
+    )
+  } catch (e) {
+    await editProgress(
+      sock,
+      from,
+      progress?.key,
+      modo,
+      'STICKER',
+      `❌ Falhou: ${e.message}`,
+      100,
+      '💀'
+    )
+  } finally {
+    cleanup(input)
+    cleanup(output)
+  }
+}
+
+async function stickerToImage(sock, m, from, modo) {
+  if (!hasFfmpeg()) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelError(
+          modo,
+          'FFMPEG',
+          'FFmpeg não está instalado.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  const quoted = getQuotedMessage(m)
+
+  if (!quoted?.stickerMessage) {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'TOIMG',
+          'Responde a um sticker para converter em imagem.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  const progress = await createProgress(
+    sock,
+    from,
+    m,
+    modo,
+    'TOIMG',
+    '📥 Recebendo sticker...'
+  )
+
+  let input = null
+  let output = null
+
+  try {
+    input = tempFile('webp')
+    output = tempFile('png')
+
+    const buffer =
+      await downloadQuotedMedia(sock, m)
+
+    if (!buffer) {
+      throw new Error(
+        'Não consegui baixar o sticker.'
+      )
+    }
+
+    fs.writeFileSync(input, buffer)
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'TOIMG',
+      '⚙️ Convertendo sticker...',
+      60
+    )
+
+    execSync(
+      `ffmpeg -y -i "${input}" -frames:v 1 "${output}"`,
+      { stdio: 'ignore' }
+    )
+
+    await sock.sendMessage(
+      from,
+      {
+        image: fs.readFileSync(output),
+        caption: '🖼️ Sticker convertido.'
+      },
+      { quoted: m }
+    )
+
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'TOIMG',
+      '✅ Conversão concluída.',
+      100
+    )
+  } catch (e) {
+    await editProgress(
+      sock,
+      from,
+      progress.key,
+      modo,
+      'TOIMG',
+      `❌ ${e.message}`,
+      100,
+      '💀'
+    )
+  } finally {
+    cleanup(input)
+    cleanup(output)
+  }
+}
+
+/* =========================================================
+   WELCOME / BYE
+========================================================= */
+
+async function doWelcome(sock, from, participant) {
+  if (!config.welcome) return
+  if (!isGroup(from)) return
+
+  const modo = getModo()
+  const p = String(participant)
+
+  if (modo === 'Aranha') {
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🕷️ 𝘼𝙍𝘼𝙉𝙃𝘼',
+`🕷️ Olha só quem apareceu...
+
+💀 Bem-vindo(a):
+${mention(p)}
+
+🕸️ Respeita o grupo.
+🕸️ Não arranja merda.
+🕸️ Não enche o saco.
+💢 Minha paciência é curta.
+
+👑 Criador:
+${OWNER_NAME}`,
+          '💀'
+        ),
+        mentions: [p]
+      }
+    )
+
+    return
+  }
+
+  await sock.sendMessage(
+    from,
+    {
+      text: makePanel(
+        modo,
+        '💌 𝘽𝙀𝙈-𝙑𝙄𝙉𝘿𝙊',
+`💙 Bem-vindo(a): ${mention(p)}
+
+🕸️ Leia as regras.
+🤝 Respeite os membros.
+⚡ Divirta-se.
+
+𖤐 Grandes poderes trazem
+grandes responsabilidades.
+
+👑 Criador:
+${OWNER_NAME}`,
+        '🕸️'
+      ),
+      mentions: [p]
+    }
+  )
+}
+
+async function doBye(sock, from, participant) {
+  if (!config.bye) return
+  if (!isGroup(from)) return
+
+  const modo = getModo()
+  const p = String(participant)
+
+  if (modo === 'Aranha') {
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🕷️ 𝘼𝙍𝘼𝙉𝙃𝘼',
+`💀 ${mention(p)} saiu.
+
+🕸️ Menos um problema.
+💢 Próximo.
+
+👑 ${OWNER_NAME}`,
+          '💀'
+        ),
+        mentions: [p]
+      }
+    )
+
+    return
+  }
+
+  await sock.sendMessage(
+    from,
+    {
+      text: makePanel(
+        modo,
+        '👋 𝘼𝙏𝙀́ 𝙈𝘼𝙄𝙎',
+`💙 ${mention(p)} saiu do grupo.
+
+🕸️ Boa sorte por aí.
+⚡ Até uma próxima.
+
+👑 ${OWNER_NAME}`,
+        '🕸️'
+      ),
+      mentions: [p]
+    }
+  )
+}
+
+module.exports.sendWelcome = doWelcome
+module.exports.sendBye = doBye
+
+/* =========================================================
+   HANDLER PRINCIPAL
+========================================================= */
+
+async function handler(
+  sock,
+  m,
+  args,
+  rawCmd,
+  pushName,
+  from
+) {
+  const modo = getModo()
+  const sender = getSender(m, from)
+
+  let cmd = String(rawCmd || '')
+    .trim()
+    .toLowerCase()
+
+  if (aliases[cmd]) {
+    cmd = aliases[cmd]
+  }
+
+  /*
+   * Foto sem comando → sticker automático
+   */
+
+  if (
+    !cmd.startsWith('.') &&
+    (
+      m.message?.imageMessage ||
+      m.message?.videoMessage
+    )
+  ) {
+    await makeSticker(
+      sock,
+      m,
+      from,
+      modo
+    )
+
+    return
+  }
+
+  if (!cmd.startsWith('.')) {
+    /*
+     * Resposta ao nome/persona.
+     */
+
+    const text =
+      m.message?.conversation ||
+      m.message?.extendedTextMessage?.text ||
+      ''
+
+    const lower = String(text).toLowerCase()
+
+    if (
+      lower.includes('peter') ||
+      lower.includes('aranha') ||
+      lower.includes(BOT_NAME.toLowerCase())
+    ) {
+      await sock.sendMessage(
+        from,
+        {
+          text: isOwner(sender)
+            ? personaOwner(modo)
+            : personaReply(modo, sender),
+          mentions: [sender]
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     MENUS
+  ======================================================= */
+
+  if (cmd === '.menu') {
+    const foto =
+      modo === 'Aranha' &&
+      fs.existsSync('./aranha.jpg')
+        ? './aranha.jpg'
+        : './peter.jpg'
+
+    const caption = menuPrincipal(modo)
+
+    if (fs.existsSync(foto)) {
+      await sock.sendMessage(
+        from,
+        {
+          image: fs.readFileSync(foto),
+          caption
+        },
+        { quoted: m }
+      )
+    } else {
+      await sock.sendMessage(
+        from,
+        { text: caption },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  if (cmd === '.menu1') {
+    await sock.sendMessage(
+      from,
+      { text: menu1() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  if (cmd === '.menu2') {
+    await sock.sendMessage(
+      from,
+      { text: menu2() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  if (cmd === '.menu3') {
+    await sock.sendMessage(
+      from,
+      { text: menu3() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  if (cmd === '.menu4') {
+    await sock.sendMessage(
+      from,
+      { text: menu4() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  if (
+    cmd === '.ownermenu' ||
+    cmd === '.om'
+  ) {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'OWNER',
+            'Este painel é exclusivo do proprietário.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      { text: ownerMenu() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  if (cmd === '.menu5') {
+    await sock.sendMessage(
+      from,
+      { text: menu5() },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     PING
+  ======================================================= */
+
+  if (cmd === '.ping') {
+    const inicio = Date.now()
+
+    const msg = await sock.sendMessage(
+      from,
+      {
+        text: panelProcessing(
+          modo,
+          'PING',
+          '🏓 Calculando resposta...'
+        )
+      },
+      { quoted: m }
+    )
+
+    const ms = Date.now() - inicio
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🏓 PING',
+`⚡ Latência: ${ms} ms
+📡 Conexão: ativa
+🤖 Bot: ${BOT_NAME}
+🕷️ Persona: ${modo}`,
+          '⚡'
+        ),
+        edit: msg.key
+      }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     STATUS
+  ======================================================= */
+
+  if (cmd === '.status') {
+    const mem = process.memoryUsage()
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⚙️ 𝙎𝙏𝘼𝙏𝙐𝙎',
+`🤖 Bot: ${BOT_NAME}
+📡 Estado: ONLINE
+🕷️ Persona: ${modo}
+⏱️ Uptime: ${formatUptime()}
+💾 RAM: ${Math.round(mem.rss / 1024 / 1024)} MB
+🧠 Node.js: ${process.version}
+⚡ Motor: Baileys
+
+📦 Recursos
+├─ modo.json: ${fs.existsSync(DATA.modo) ? 'OK' : '—'}
+├─ regras.json: ${fs.existsSync(DATA.regras) ? 'OK' : '—'}
+└─ warns.json: ${fs.existsSync(DATA.warns) ? 'OK' : '—'}`,
+          '⚙️'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     MODO
+  ======================================================= */
+
+  if (cmd === '.modo') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'MODO',
+            'Somente o proprietário pode alterar a personalidade.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const novo = String(args[0] || '')
+      .toLowerCase()
+
+    if (
+      novo !== 'peter' &&
+      novo !== 'aranha'
+    ) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'MODO',
+            'Usa:\n.modo peter\n.modo aranha'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const valor =
+      novo === 'aranha'
+        ? setModo('Aranha')
+        : setModo('Peter')
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          valor,
+          'PERSONA',
+          `🕷️ Novo modo: ${valor}\n⚡ Alteração aplicada.`
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     PETER
+  ======================================================= */
+
+  if (cmd === '.peter') {
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🕷️ 𝙋𝙀𝙏𝙀𝙍',
+`💙 Olá, eu sou o PETER-BOT.
+
+🕸️ Personalidade atual: ${modo}
+
+"Com grandes poderes vêm
+grandes responsabilidades."
+
+👑 Criador:
+${OWNER_NAME}`,
+          '🕸️'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     DONO
+  ======================================================= */
+
+  if (cmd === '.dono') {
+    const target = sender
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '👑 𝘿𝙊𝙉𝙊',
+`👑 Criador: ${OWNER_NAME}
+🤖 Bot: ${BOT_NAME}
+🕷️ Persona: ${modo}`,
+          '👑'
+        ),
+        mentions: [target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     COIN
+  ======================================================= */
+
+  if (cmd === '.coin') {
+    const resultado =
+      Math.random() < 0.5
+        ? '🪙 CARA'
+        : '🪙 COROA'
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🪙 COIN',
+          `Resultado: ${resultado}`,
+          '🪙'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     DADO
+  ======================================================= */
+
+  if (cmd === '.dado') {
+    const n =
+      Math.floor(Math.random() * 6) + 1
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🎲 DADO',
+          `Resultado: ${n}`,
+          '🎲'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     CHANCE
+  ======================================================= */
+
+  if (cmd === '.chance') {
+    const alvo =
+      args.join(' ') || 'isso'
+
+    const valor =
+      Math.floor(Math.random() * 101)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🎯 CHANCE',
+          `🎯 Probabilidade de "${alvo}": ${valor}%`,
+          '🎯'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SHIP
+  ======================================================= */
+
+  if (cmd === '.ship') {
+    const mentions = getMentions(m)
+
+    if (mentions.length < 2) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'SHIP',
+            'Menciona duas pessoas.\n\nExemplo: `.ship @A @B`'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const valor =
+      Math.floor(Math.random() * 101)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '❤️ SHIP',
+`💘 ${mention(mentions[0])}
+❤️ ${mention(mentions[1])}
+
+Compatibilidade:
+${valor}%`,
+          '❤️'
+        ),
+        mentions: mentions.slice(0, 2)
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ZOAR
+  ======================================================= */
+
+  if (cmd === '.zoar') {
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'ZOAR',
+            'Menciona ou responde à pessoa que queres zoar.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const frases =
+      modo === 'Aranha'
+        ? [
+            `💢 ${mention(target)}, tu és tão perdido que até o GPS desistiu.`,
+            `🕷️ ${mention(target)}, baixa a bola antes que ela precise de manual.`,
+            `💀 ${mention(target)}, isso foi tão ruim que merece replay em câmera lenta.`,
+            `😏 ${mention(target)}, tua lógica pediu demissão.`
+          ]
+        : [
+            `😂 ${mention(target)}, essa foi boa!`,
+            `🕷️ ${mention(target)}, cuidado, estás sendo zoado.`,
+            `💙 ${mention(target)}, foi só uma brincadeira.`
+          ]
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '😈 ZOERA',
+          pick(frases),
+          modo === 'Aranha' ? '💀' : '🕸️'
+        ),
+        mentions: [target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ABRAÇAR
+  ======================================================= */
+
+  if (cmd === '.abraçar') {
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'ABRAÇO',
+            'Menciona ou responde a alguém.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🤗 ABRAÇO',
+          `${mention(sender)} abraçou ${mention(target)}. 🤗`,
+          '💙'
+        ),
+        mentions: [sender, target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SOCO
+  ======================================================= */
+
+  if (cmd === '.soco') {
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'SOCO',
+            'Menciona ou responde a alguém.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '👊 SOCO',
+          `${mention(sender)} deu um soco virtual em ${mention(target)}. 💥`,
+          '💢'
+        ),
+        mentions: [sender, target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     BEIJAR
+  ======================================================= */
+
+  if (cmd === '.beijar') {
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'BEIJO',
+            'Menciona ou responde a alguém.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '💋 BEIJO',
+          `${mention(sender)} mandou um beijo para ${mention(target)}. 💋`,
+          '❤️'
+        ),
+        mentions: [sender, target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     PERGUNTA
+  ======================================================= */
+
+  if (cmd === '.pergunta') {
+    const perguntas = [
+      'Quem é o mais engraçado do grupo?',
+      'Quem provavelmente vai chegar atrasado?',
+      'Quem seria o líder numa missão?',
+      'Quem é o mais competitivo?',
+      'Quem manda mais áudios?',
+      'Quem tem mais chance de esquecer alguma coisa?',
+      'Quem seria o primeiro a sobreviver a um apocalipse?'
+    ]
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '❓ PERGUNTA',
+          pick(perguntas),
+          '❓'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     REGRAS
+  ======================================================= */
+
+  if (cmd === '.regras') {
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '📜 𝙍𝙀𝙂𝙍𝘼𝙎',
+          regras.texto,
+          '📜'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     DESCRIÇÃO
+  ======================================================= */
+
+  if (cmd === '.descrição') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '📝 𝘿𝙀𝙎𝘾𝙍𝙄𝘾̧𝘼̃𝙊',
+          meta.desc || 'O grupo não possui descrição.',
+          '📝'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     INFO GRUPO
+  ======================================================= */
+
+  if (cmd === '.infogp') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const admins =
+      meta.participants.filter(
+        p =>
+          p.admin === 'admin' ||
+          p.admin === 'superadmin'
+      ).length
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '👥 𝙄𝙉𝙁𝙊 𝙂𝙍𝙐𝙋𝙊',
+`📌 Nome: ${meta.subject}
+👥 Membros: ${meta.participants.length}
+🛡️ Administradores: ${admins}
+🆔 ID: ${from}
+📅 Criado: ${
+  meta.creation
+    ? new Date(meta.creation * 1000).toLocaleString()
+    : 'indisponível'
+}`,
+          '👥'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ADMINS
+  ======================================================= */
+
+  if (cmd === '.admins') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const admins =
+      meta.participants.filter(
+        p =>
+          p.admin === 'admin' ||
+          p.admin === 'superadmin'
+      )
+
+    const text = admins
+      .map(
+        (p, i) =>
+          `${i + 1}. ${mention(p.id)}`
+      )
+      .join('\n')
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '👮 𝘼𝘿𝙈𝙄𝙉𝙎',
+          text || 'Nenhum administrador encontrado.',
+          '🛡️'
+        ),
+        mentions: admins.map(p => p.id)
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     LINK GRUPO
+  ======================================================= */
+
+  if (cmd === '.linkgp') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    try {
+      const code =
+        await sock.groupInviteCode(from)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: makePanel(
+            modo,
+            '🔗 𝙇𝙄𝙉𝙆',
+            `🔗 https://chat.whatsapp.com/${code}`,
+            '🔗'
+          )
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'LINK',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     TAGALL
+  ======================================================= */
+
+  if (cmd === '.tagall') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const mentions =
+      meta.participants.map(
+        p => p.id
+      )
+
+    const texto =
+      args.join(' ') ||
+      '📣 Atenção, pessoal!'
+
+    await sock.sendMessage(
+      from,
+      {
+        text:
+          makePanel(
+            modo,
+            '📣 𝙏𝘼𝙂𝘼𝙇𝙇',
+            texto,
+            '📣'
+          ) +
+          '\n\n' +
+          mentions
+            .map(mention)
+            .join(' '),
+        mentions
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     HIDETAG
+  ======================================================= */
+
+  if (cmd === '.hidetag') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const mentions =
+      meta.participants.map(
+        p => p.id
+      )
+
+    await sock.sendMessage(
+      from,
+      {
+        text:
+          makePanel(
+            modo,
+            '🕶️ 𝙃𝙄𝘿𝙀𝙏𝘼𝙂',
+            args.join(' ') ||
+              '📢 Aviso do grupo.',
+            '🕶️'
+          ),
+        mentions
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     MEMBROS
+  ======================================================= */
+
+  if (cmd === '.membros') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const list =
+      meta.participants
+        .map(
+          (p, i) =>
+            `${i + 1}. ${mention(p.id)}`
+        )
+        .join('\n')
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '👥 𝙈𝙀𝙈𝘽𝙍𝙊𝙎',
+          list,
+          '👥'
+        ),
+        mentions:
+          meta.participants.map(
+            p => p.id
+          )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ONLINE
+  ======================================================= */
+
+  if (cmd === '.online') {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'ONLINE',
+          'O estado de presença individual dos membros não está disponível de forma confiável para este comando.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     MUTE / UNMUTE
+  ======================================================= */
+
+  if (
+    cmd === '.mute' ||
+    cmd === '.unmute'
+  ) {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    if (!(await requireBotAdmin(sock, m, from))) {
+      return
+    }
+
+    try {
+      const setting =
+        cmd === '.mute'
+          ? 'announcement'
+          : 'not_announcement'
+
+      await sock.groupSettingUpdate(
+        from,
+        setting
+      )
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            cmd === '.mute'
+              ? 'GRUPO FECHADO'
+              : 'GRUPO ABERTO',
+            cmd === '.mute'
+              ? '🔒 Apenas administradores podem enviar mensagens.'
+              : '🔓 O grupo voltou a permitir mensagens.'
+          )
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'GRUPO',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     AÇÕES COM CONFIRMAÇÃO
+  ======================================================= */
+
+  if (
+    cmd === '.ban' ||
+    cmd === '.kick' ||
+    cmd === '.promover' ||
+    cmd === '.rebaixar'
+  ) {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    if (!(await requireBotAdmin(sock, m, from))) {
+      return
+    }
+
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'ALVO',
+            'Menciona, responde ou indica o número da pessoa.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    if (isOwner(target)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'PROTEÇÃO',
+            'O proprietário não pode ser alvo desta ação.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    if (normalizeJid(target) === normalizeJid(sock.user?.id)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'PROTEÇÃO',
+            'Não posso executar esta ação contra mim mesmo.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const nomes = {
+      '.ban': 'BANIR',
+      '.kick': 'REMOVER',
+      '.promover': 'PROMOVER',
+      '.rebaixar': 'REBAIXAR'
+    }
+
+    setPending(
+      from,
+      sender,
+      cmd,
+      target
+    )
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelConfirmation(
+          modo,
+          nomes[cmd],
+`🎯 Alvo: ${mention(target)}
+
+⚠️ Esta ação será executada somente
+após confirmação.
+
+Digite:
+.confirmar
+
+⏳ Expira em 30 segundos.`,
+          '⏳'
+        ),
+        mentions: [target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     CONFIRMAR
+  ======================================================= */
+
+  if (cmd === '.confirmar') {
+    const data =
+      getPending(from, sender)
+
+    if (!data) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'CONFIRMAÇÃO',
+            'Não existe nenhuma ação pendente ou ela já expirou.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    if (!(await requireAdmin(sock, m, from))) {
+      clearPending(from, sender)
+      return
+    }
+
+    if (!(await requireBotAdmin(sock, m, from))) {
+      clearPending(from, sender)
+      return
+    }
+
+    const target = data.target
+
+    if (isOwner(target)) {
+      clearPending(from, sender)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'PROTEÇÃO',
+            'Ação cancelada: o proprietário está protegido.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    try {
+      if (data.action === '.ban' || data.action === '.kick') {
+        await sock.groupParticipantsUpdate(
+          from,
+          [target],
+          'remove'
+        )
+      }
+
+      if (data.action === '.promover') {
+        await sock.groupParticipantsUpdate(
+          from,
+          [target],
+          'promote'
+        )
+      }
+
+      if (data.action === '.rebaixar') {
+        await sock.groupParticipantsUpdate(
+          from,
+          [target],
+          'demote'
+        )
+      }
+
+      clearPending(from, sender)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            'AÇÃO EXECUTADA',
+`⚡ Ação: ${data.action}
+🎯 Alvo: ${mention(target)}
+👮 Executor: ${mention(sender)}`,
+            '🛡️'
+          ),
+          mentions: [target, sender]
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      clearPending(from, sender)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'AÇÃO',
+            `Não foi possível executar.\n\n${e.message}`
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     WARN
+  ======================================================= */
+
+  if (cmd === '.warn') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'WARN',
+            'Menciona ou responde à pessoa.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    if (isOwner(target)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'PROTEÇÃO',
+            'O proprietário não pode receber warn.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const total =
+      addWarn(from, target)
+
+    let extra =
+      `⚠️ Warn ${total}/3`
+
+    if (total >= 3) {
+      if (await isBotAdmin(sock, from)) {
+        try {
+          await sock.groupParticipantsUpdate(
+            from,
+            [target],
+            'remove'
+          )
+
+          resetWarn(from, target)
+
+          extra +=
+            '\n🚫 Limite atingido. Membro removido.'
+        } catch {
+          extra +=
+            '\n❌ Limite atingido, mas não consegui remover o membro.'
+        }
+      } else {
+        extra +=
+          '\n⚠️ O bot não é administrador; não conseguiu remover.'
+      }
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⚠️ WARN',
+`🎯 Alvo: ${mention(target)}
+${extra}
+
+👮 Aplicado por: ${mention(sender)}`,
+          '⚠️'
+        ),
+        mentions: [target, sender]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     WARNINGS
+  ======================================================= */
+
+  if (cmd === '.warnings') {
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      ) || sender
+
+    const total =
+      getWarn(from, target)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '📊 𝙒𝘼𝙍𝙉𝙄𝙉𝙂𝙎',
+`👤 Membro: ${mention(target)}
+⚠️ Warns: ${total}/3`,
+          '⚠️'
+        ),
+        mentions: [target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     CLEARWARN
+  ======================================================= */
+
+  if (cmd === '.clearwarn') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const target =
+      await resolveTarget(
+        sock,
+        m,
+        from,
+        args
+      )
+
+    if (!target) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'CLEARWARN',
+            'Menciona ou responde à pessoa.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    resetWarn(from, target)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          modo,
+          'CLEARWARN',
+          `Warns de ${mention(target)} foram zerados.`
+        ),
+        mentions: [target]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     DEL
+  ======================================================= */
+
+  if (cmd === '.del') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const quoted = getContextInfo(m)
+
+    if (!quoted?.stanzaId) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'DELETE',
+            'Responde à mensagem que queres apagar.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    if (!(await requireBotAdmin(sock, m, from))) {
+      return
+    }
+
+    try {
+      await sock.sendMessage(
+        from,
+        {
+          delete: {
+            remoteJid: from,
+            fromMe: false,
+            id: quoted.stanzaId,
+            participant: quoted.participant
+          }
+        }
+      )
+
+      return
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'DELETE',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     CLEAR
+  ======================================================= */
+
+  if (cmd === '.clear') {
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'CLEAR',
+          'A API do WhatsApp não oferece uma limpeza arbitrária do histórico inteiro do grupo. Use `.del` respondendo à mensagem desejada.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SETRULES
+  ======================================================= */
+
+  if (cmd === '.setrules') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const texto =
+      args.join(' ').trim()
+
+    if (!texto) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'REGRAS',
+            'Escreve as novas regras depois do comando.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    regras.texto = texto
+    saveJSON(DATA.regras, regras)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          modo,
+          'REGRAS',
+          'As regras foram atualizadas.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SETWELCOME
+  ======================================================= */
+
+  if (cmd === '.setwelcome') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const value =
+      args.join(' ').trim()
+
+    if (!value) {
+      config.welcome =
+        !config.welcome
+
+      saveJSON(DATA.config, config)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            'WELCOME',
+            `Sistema de boas-vindas: ${
+              config.welcome
+                ? 'ATIVADO'
+                : 'DESATIVADO'
+            }`
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    config.welcomeText = value
+    config.welcome = true
+
+    saveJSON(DATA.config, config)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          modo,
+          'WELCOME',
+          'Mensagem personalizada configurada.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SETBYE
+  ======================================================= */
+
+  if (cmd === '.setbye') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const value =
+      args.join(' ').trim()
+
+    if (!value) {
+      config.bye = !config.bye
+
+      saveJSON(DATA.config, config)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            'BYE',
+            `Sistema de despedida: ${
+              config.bye
+                ? 'ATIVADO'
+                : 'DESATIVADO'
+            }`
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    config.byeText = value
+    config.bye = true
+
+    saveJSON(DATA.config, config)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          modo,
+          'BYE',
+          'Mensagem personalizada configurada.'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     EVENTO
+  ======================================================= */
+
+  if (cmd === '.evento') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const texto =
+      args.join(' ').trim()
+
+    if (!texto) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'EVENTO',
+            'Exemplo:\n.evento Treino amanhã às 16h'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '📅 𝙀𝙑𝙀𝙉𝙏𝙊',
+          `📌 ${texto}\n\n👑 Criado por: ${mention(sender)}`,
+          '📅'
+        ),
+        mentions: [sender]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     CONTAGEM
+  ======================================================= */
+
+  if (cmd === '.contagem') {
+    const n = Number(args[0])
+
+    if (
+      !Number.isInteger(n) ||
+      n < 1 ||
+      n > 100
+    ) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'CONTAGEM',
+            'Usa um número entre 1 e 100.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⏳ 𝘾𝙊𝙉𝙏𝘼𝙂𝙀𝙈',
+          `🚀 Contagem iniciada em ${n}.`,
+          '⏳'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     LEMBRETE
+  ======================================================= */
+
+  if (cmd === '.lembrete') {
+    const texto =
+      args.join(' ').trim()
+
+    if (!texto) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'LEMBRETE',
+            'Escreve o lembrete.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⏰ 𝙇𝙀𝙈𝘽𝙍𝙀𝙏𝙀',
+          `📌 ${texto}\n\n⚠️ Este comando registra o texto, mas não cria uma tarefa persistente de notificação.`,
+          '⏰'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ANÚNCIO
+  ======================================================= */
+
+  if (cmd === '.anuncio') {
+    if (!(await requireAdmin(sock, m, from))) return
+
+    const texto =
+      args.join(' ').trim()
+
+    if (!texto) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'ANÚNCIO',
+            'Escreve o conteúdo do anúncio.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '📢 𝘼𝙉𝙐́𝙉𝘾𝙄𝙊',
+          `📢 ${texto}\n\n👑 Administração`,
+          '📢'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SORTEIO
+  ======================================================= */
+
+  if (cmd === '.sorteio') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const participants =
+      meta.participants
+
+    if (!participants.length) return
+
+    const vencedor =
+      pick(participants)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🎲 𝙎𝙊𝙍𝙏𝙀𝙄𝙊',
+          `🏆 Vencedor:\n${mention(vencedor.id)}`,
+          '🏆'
+        ),
+        mentions: [vencedor.id]
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     RANKING
+  ======================================================= */
+
+  if (cmd === '.ranking') {
+    if (!(await requireGroup(sock, m, from))) return
+
+    const meta =
+      await sock.groupMetadata(from)
+
+    const arr =
+      meta.participants
+        .slice(0, 10)
+        .map((p, i) =>
+          `${i + 1}. ${mention(p.id)}`
+        )
+        .join('\n')
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🏆 𝙍𝘼𝙉𝙆𝙄𝙉𝙂',
+          arr,
+          '🏆'
+        ),
+        mentions:
+          meta.participants
+            .slice(0, 10)
+            .map(p => p.id)
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     QUIZ
+  ======================================================= */
+
+  if (cmd === '.quiz') {
+    const quizzes = [
+      {
+        q: 'Qual planeta é conhecido como planeta vermelho?',
+        a: 'marte'
+      },
+      {
+        q: 'Quantos lados tem um hexágono?',
+        a: '6'
+      },
+      {
+        q: 'Qual é o maior oceano da Terra?',
+        a: 'pacífico'
+      }
+    ]
+
+    const quiz = pick(quizzes)
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🧠 𝙌𝙐𝙄𝙕',
+          `❓ ${quiz.q}\n\nResponde no grupo.`,
+          '🧠'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     DESAFIO
+  ======================================================= */
+
+  if (cmd === '.desafio') {
+    const desafios = [
+      '🎯 Manda uma mensagem usando apenas emojis.',
+      '😂 Conta uma piada no grupo.',
+      '🧠 Faz uma pergunta difícil para alguém.',
+      '🎤 Envia um áudio de 5 segundos cantando.',
+      '⚡ Escolhe alguém para um duelo de perguntas.'
+    ]
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⚔️ 𝘿𝙀𝙎𝘼𝙁𝙄𝙊',
+          pick(desafios),
+          '⚔️'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ENQUETE
+  ======================================================= */
+
+  if (cmd === '.enquete') {
+    const texto =
+      args.join(' ').trim()
+
+    if (!texto) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'ENQUETE',
+            'Exemplo:\n.enquete Qual é o melhor jogo?'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🗳️ 𝙀𝙉𝙌𝙐𝙀𝙏𝙀',
+          `❓ ${texto}\n\n👍 SIM\n👎 NÃO`,
+          '🗳️'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     MEDIA COMMANDS
+  ======================================================= */
+
+  if (
+    cmd === '.s' ||
+    cmd === '.st'
+  ) {
+    await makeSticker(
+      sock,
+      m,
+      from,
+      modo
+    )
+
+    return
+  }
+
+  if (
+    cmd === '.toimg' ||
+    cmd === '.ti'
+  ) {
+    await stickerToImage(
+      sock,
+      m,
+      from,
+      modo
+    )
+
+    return
+  }
+
+  if (
+    cmd === '.stickerinfo' ||
+    cmd === '.stickerid' ||
+    cmd === '.stickerpack'
+  ) {
+    const quoted =
+      getQuotedMessage(m)
+
+    if (!quoted?.stickerMessage) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'STICKER',
+            'Responde a um sticker.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const s =
+      quoted.stickerMessage
+
+    let body =
+      `🆔 ID: ${s.fileSha256 ? 'disponível' : '—'}\n` +
+      `📐 ${s.width || '?'} × ${s.height || '?'}\n` +
+      `🎬 Animado: ${s.isAnimated ? 'sim' : 'não'}`
+
+    if (cmd === '.stickerpack') {
+      body +=
+        `\n📦 Pack: ${s.packname || 'não definido'}`
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '🎨 STICKER',
+          body,
+          '🎨'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     SAVE / REPOST
+  ======================================================= */
+
+  if (
+    cmd === '.save' ||
+    cmd === '.repost'
+  ) {
+    const quoted =
+      getQuotedMessage(m)
+
+    if (!quoted) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'MEDIA',
+            'Responde à mensagem que queres reutilizar.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    try {
+      const fake = {
+        key: {
+          remoteJid: from,
+          id: m.key.id,
+          participant:
+            getQuotedParticipant(m)
+        },
+        message: quoted
+      }
+
+      const buffer =
+        await downloadMediaMessage(
+          fake,
+          'buffer',
+          {}
+        )
+
+      if (quoted.imageMessage) {
+        await sock.sendMessage(
+          from,
+          {
+            image: buffer,
+            caption: '💾 Mídia reutilizada.'
+          },
+          { quoted: m }
+        )
+
+        return
+      }
+
+      if (quoted.videoMessage) {
+        await sock.sendMessage(
+          from,
+          {
+            video: buffer,
+            caption: '💾 Mídia reutilizada.'
+          },
+          { quoted: m }
+        )
+
+        return
+      }
+
+      if (quoted.audioMessage) {
+        await sock.sendMessage(
+          from,
+          {
+            audio: buffer,
+            mimetype:
+              quoted.audioMessage.mimetype
+          },
+          { quoted: m }
+        )
+
+        return
+      }
+
+      if (quoted.stickerMessage) {
+        await sock.sendMessage(
+          from,
+          {
+            sticker: buffer
+          },
+          { quoted: m }
+        )
+
+        return
+      }
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'MEDIA',
+            'Esse tipo de mensagem não pode ser reutilizado por este comando.'
+          )
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'MEDIA',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     MEME
+  ======================================================= */
+
+  if (cmd === '.meme') {
+    const texto =
+      args.join(' ').trim() ||
+      'Quando o bot finalmente funciona 😂'
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '😂 𝙈𝙀𝙈𝙀',
+          texto,
+          '😂'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     REACT
+  ======================================================= */
+
+  if (cmd === '.react') {
+    const emojis = [
+      '❤️',
+      '😂',
+      '🔥',
+      '💀',
+      '😮',
+      '👏',
+      '🤡',
+      '🕷️'
+    ]
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '❤️ 𝙍𝙀𝘼𝘾𝙏',
+          `Reação: ${pick(emojis)}`,
+          '❤️'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     QUOTE
+  ======================================================= */
+
+  if (cmd === '.quote') {
+    const quoted =
+      getQuotedMessage(m)
+
+    if (!quoted) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'QUOTE',
+            'Responde a uma mensagem.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const text =
+      quoted.conversation ||
+      quoted.extendedTextMessage?.text ||
+      quoted.imageMessage?.caption ||
+      quoted.videoMessage?.caption ||
+      '[mídia]'
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '💬 𝙌𝙐𝙊𝙏𝙀',
+          `“${text}”`,
+          '💬'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     OWNER CONFIG
+  ======================================================= */
+
+  if (cmd === '.config') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'OWNER',
+            'Apenas o proprietário pode usar esta função.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: makePanel(
+          modo,
+          '⚙️ 𝘾𝙊𝙉𝙁𝙄𝙂',
+`🤖 Bot: ${BOT_NAME}
+👑 Dono: ${OWNER_NAME}
+🕷️ Persona: ${getModo()}
+📁 Modo: ${DATA.modo}
+📜 Regras: ${DATA.regras}
+⚠️ Warns: ${DATA.warns}`,
+          '👑'
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     ACESSO
+  ======================================================= */
+
+  if (cmd === '.acesso') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'OWNER',
+            'Acesso negado.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelSuccess(
+          modo,
+          'ACESSO',
+`👑 Proprietário: autorizado
+🛡️ Proteção: ativa
+🤖 Bot: protegido
+⚠️ Confirmações: 30 segundos`
+        )
+      },
+      { quoted: m }
+    )
+
+    return
+  }
+
+  /* =======================================================
+     RESTART
+  ======================================================= */
+
+  if (cmd === '.restart') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'RESTART',
+            'Somente o proprietário.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'RESTART',
+          'Reiniciando o processo...'
+        )
+      },
+      { quoted: m }
+    )
+
+    setTimeout(() => {
+      process.exit(0)
+    }, 1000)
+
+    return
+  }
+
+  /* =======================================================
+     SHUTDOWN
+  ======================================================= */
+
+  if (cmd === '.shutdown') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'SHUTDOWN',
+            'Somente o proprietário.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    await sock.sendMessage(
+      from,
+      {
+        text: panelWarning(
+          modo,
+          'SHUTDOWN',
+          'Desligando o processo...'
+        )
+      },
+      { quoted: m }
+    )
+
+    setTimeout(() => {
+      process.exit(0)
+    }, 1000)
+
+    return
+  }
+
+  /* =======================================================
+     SETBIO
+  ======================================================= */
+
+  if (cmd === '.setbio') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'BIO',
+            'Somente o proprietário.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const bio =
+      args.join(' ').trim()
+
+    if (!bio) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'BIO',
+            'Escreve a nova descrição.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    try {
+      await sock.updateProfileStatus(bio)
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            'BIO',
+            'Descrição do perfil atualizada.'
+          )
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'BIO',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     SETPP
+  ======================================================= */
+
+  if (cmd === '.setpp') {
+    if (!isOwner(sender)) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelPermission(
+            modo,
+            'PERFIL',
+            'Somente o proprietário.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    const quoted =
+      getQuotedMessage(m)
+
+    if (!quoted?.imageMessage) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelWarning(
+            modo,
+            'PERFIL',
+            'Responde a uma imagem.'
+          )
+        },
+        { quoted: m }
+      )
+
+      return
+    }
+
+    try {
+      const buffer =
+        await downloadQuotedMedia(
+          sock,
+          m
+        )
+
+      if (!buffer) {
+        throw new Error(
+          'Não consegui baixar a imagem.'
+        )
+      }
+
+      await sock.updateProfilePicture(
+        sock.user.id,
+        buffer
+      )
+
+      await sock.sendMessage(
+        from,
+        {
+          text: panelSuccess(
+            modo,
+            'PERFIL',
+            'Foto do perfil atualizada.'
+          )
+        },
+        { quoted: m }
+      )
+    } catch (e) {
+      await sock.sendMessage(
+        from,
+        {
+          text: panelError(
+            modo,
+            'PERFIL',
+            e.message
+          )
+        },
+        { quoted: m }
+      )
+    }
+
+    return
+  }
+
+  /* =======================================================
+     COMANDO DESCONHECIDO
+  ======================================================= */
+
+  await sock.sendMessage(
+    from,
+    {
+      text: panelWarning(
+        modo,
+        'COMANDO',
+        `Não reconheci: ${cmd}\n\nUsa .menu para ver os comandos.`
+      )
+    },
+    { quoted: m }
+  )
+}
+
+module.exports = handler

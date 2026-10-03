@@ -1,0 +1,36 @@
+PETER-BOT v2 — instalação (Termux)
+
+1) Copia o zip para a pasta Downloads e corre:
+   termux-setup-storage
+   pkg install unzip -y
+   cd ~ && unzip -o ~/storage/downloads/PETER-BOT-v2.zip -d ~/peter-v2
+   sh ~/peter-v2/PETER-BOT-v2/instalar.sh
+
+2) Edita os números do dono (só os teus):
+   nano ~/PETER-BOT/src/config.js
+
+3) Inicia (com reinício automático):
+   cd ~/PETER-BOT && sh start.sh
+
+O instalador faz backup de tudo (menos auth) e NÃO mexe em: auth, m2, core, panels, personality.
+Para voltar atrás: copia ~/PETER-BOT/_old/index-*.js e bot-*.js de volta.
+
+IA DE CONVERSA (opcional, grátis):
+1) Cria uma chave grátis em https://aistudio.google.com/app/apikey
+2) sh ~/PETER-BOT/ia-config.sh   (provedor: gemini · cola a chave)
+3) Reinicia o bot e manda .ia no WhatsApp para ver o estado.
+Sem chave, o bot usa o banco de frases local.
+
+v3.0 · ITADØRI (tema Jujutsu)
+- Personas: YUJI (simpático) e YUJIM (calmo, frio, sombrio).  .modo yuji | yujim
+- Imagens: o instalador copia da galeria (DCIM/Camera, Download, Pictures) para ~/PETER-BOT/img:
+  menu1..menu5, Ownermenu, Perfilbot, Banido, Yujujj (YUJI), YujiModulo (YUJIM).
+  Para repetir: sh ~/PETER-BOT/imagens.sh
+- Downloads (.mp3 .play .soundcloud .spotify .mp4 .tt .ig .fb): pkg install yt-dlp ffmpeg python
+- Menu em lista (botão ≡ ABRIR MENU): primeiro .testelista; se aparecer o botão, .menumodo lista
+
+v3.2
+- .mp3 envia como DOCUMENTO · .play e .spotify mostram a CAPA + informações e depois o áudio · .soundcloud envia áudio.
+- RPG Ninja (menu .menu6): .criar Nome → .aldeia → .cla → .natureza; .treinar .missao .cacar .duelo .loja ...
+- Investimento VIP (menu .menu7): simulador com dinheiro VIRTUAL + calculadoras. Só o dono liga VIP: .vip add @pessoa
+- Menu em lista: toque em botão já não cita a resposta do botão (era o que travava). Se a lista falhar, .menumodo mostra o último erro.
